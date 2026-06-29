@@ -1,55 +1,51 @@
 const express = require('express');
-const { Client, LocalAuth } = require('whatsapp-web.js');
 const QRCode = require('qrcode');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const app = express();
 const port = process.env.PORT || 3000;
 
 let qrData = '';
-let isReady = false;
+let isConnected = false;
 
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu'
-        ],
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined
-    }
-});
+async function startSock() {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    const sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+    });
 
-client.on('qr', async (qr) => {
-    console.log('QR Code generated');
-    try {
-        qrData = await QRCode.toDataURL(qr);
-    } catch (e) {
-        console.error('Error generating QR:', e);
-    }
-});
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        if (qr) {
+            // Generate QR code image
+            try {
+                qrData = await QRCode.toDataURL(qr);
+            } catch (e) {
+                console.error('QR generation error:', e);
+            }
+        }
+        if (connection === 'open') {
+            console.log('Connected successfully');
+            isConnected = true;
+            qrData = '';
+        }
+        if (connection === 'close') {
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            console.log('Connection closed, reconnecting:', shouldReconnect);
+            if (shouldReconnect) {
+                startSock();
+            }
+        }
+    });
 
-client.on('ready', () => {
-    console.log('WhatsApp client is ready!');
-    isReady = true;
-    qrData = '';
-});
+    sock.ev.on('creds.update', saveCreds);
+}
 
-client.on('disconnected', () => {
-    isReady = false;
-    qrData = '';
-    client.initialize();
-});
-
-client.initialize();
+startSock();
 
 app.get('/', (req, res) => {
-    if (isReady) {
+    if (isConnected) {
         res.send('<h1>Connected successfully.</h1>');
     } else if (qrData) {
         res.send(`
